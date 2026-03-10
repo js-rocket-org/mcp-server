@@ -8,7 +8,7 @@
 /* TEST WITH
 
 ## initialize
-curl -X POST http://localhost:3000/mcp \
+curl -X POST http://localhost:3003/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
       "protocolVersion": "2024-11-05",
@@ -17,13 +17,13 @@ curl -X POST http://localhost:3000/mcp \
     } }'
 
 ## list tools
-curl -X POST http://localhost:3000/mcp \
+curl -X POST http://localhost:3003/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }'
 
 
 ## get time
-curl -X POST http://localhost:3000/mcp-server/v1 \
+curl -X POST http://localhost:3003/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "get_current_utc_time", "arguments": {} }}'
 
@@ -35,19 +35,31 @@ import http, { IncomingMessage, ServerResponse } from "node:http";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 
-
+// For output that always go to the screen
 const println = console.log;
+// For logging to debug console or file
 const logln = (...args) => { console.log(...args) }
 
-const RESULT_FILE = '/Volumes/RAMDisk/zztmp.htm'
-const MAX_HTML_READ_LENGTH = 8192
-let LAST_HTML_CONTENT = ""
+/* ================================
+   CONFIG
+================================ */
 
-const FETCH_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36"
-const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; // change to full path if needed
+const PORT = 3003;
+const SERVER_NAME = "My MCP Server";
+const SERVER_VERSION = "1.0.0";
+
+// 5MB
+const MAX_BODY_SIZE = 5 * 1024 * 1024;
+const MAX_HTML_READ_LENGTH = 8192;
+
+const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+const TMP_HTML_PATH = '/Volumes/RAMDisk/zztmp.htm'
+
+let LAST_HTML_CONTENT = "";
 
 /* ================================
-   MCP TYPES (2024 SPEC)
+   TYPES
 ================================ */
 
 interface JsonRpcRequest {
@@ -68,28 +80,22 @@ interface JsonRpcResponse {
 }
 
 /* ================================
-   CONFIG
+   HTTP HELPERS
 ================================ */
 
-const PORT = 3003;
-const SERVER_NAME = "My MCP Server";
-const SERVER_VERSION = "1.0.0";
-
-/* ================================
-   UTIL: STREAM JSON RESPONSE
-================================ */
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "*"
+};
 
 function sendResponse(res: ServerResponse, response: JsonRpcResponse) {
   res.writeHead(200, {
     "Content-Type": "application/json",
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': '*',
-    "Transfer-Encoding": "chunked"
+    ...CORS_HEADERS
   });
 
-  res.write(JSON.stringify(response));
-  res.end();
+  res.end(JSON.stringify(response));
 }
 
 function sendError(
@@ -105,26 +111,61 @@ function sendError(
   });
 }
 
+/* ================================
+   URL VALIDATION
+================================ */
 
+function validateUrl(url: string) {
+  let parsed: URL;
 
-// HTML cleaner -----------------
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Invalid URL");
+  }
 
-/**
- * Simple DOM-like parser to strip unwanted tags
- * without relying on regex
- */
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Only http/https URLs allowed");
+  }
 
-function parseHtml(html) {
-  // Node types
+  /* Allow local urls
+    const host = parsed.hostname;
+  
+    if (
+      host === "localhost" ||
+      host.startsWith("127.") ||
+      host.startsWith("10.") ||
+      host.startsWith("192.168.") ||
+      host.startsWith("169.254.")
+    ) {
+      throw new Error("Private network URLs not allowed");
+    }
+  */
+
+  return parsed.toString();
+}
+
+/* ================================
+   SIMPLE HTML CLEANER
+================================ */
+
+function parseHtml(html: string) {
   const ELEMENT_NODE = 1;
   const TEXT_NODE = 3;
 
   class Node {
-    constructor(type, tagName = null, text = "") {
+    type: number;
+    tagName?: string;
+    text?: string;
+    attrs?: Record<string, string>;
+    children: Node[];
+
+    constructor(type: number, tagName?: string, text?: string) {
       this.type = type;
       this.tagName = tagName;
-      this.children = [];
       this.text = text;
+      this.attrs = {};
+      this.children = [];
     }
   }
 
@@ -134,44 +175,51 @@ function parseHtml(html) {
 
   while (i < html.length) {
     if (html[i] === "<") {
-      // Detect end tag
       if (html[i + 1] === "/") {
         const end = html.indexOf(">", i);
         if (end === -1) break;
-        const tagName = html.slice(i + 2, end).trim().toLowerCase();
-        // Pop stack until matching tag
+
+        const tag = html.slice(i + 2, end).trim().toLowerCase();
+
         for (let j = stack.length - 1; j >= 0; j--) {
-          if (stack[j].tagName === tagName) {
+          if (stack[j].tagName === tag) {
             stack.splice(j);
             break;
           }
         }
+
         i = end + 1;
       } else {
-        // Start tag
         const end = html.indexOf(">", i);
         if (end === -1) break;
+
         const tagContent = html.slice(i + 1, end).trim();
-        const spaceIndex = tagContent.indexOf(" ");
-        const tagName = (spaceIndex > -1 ? tagContent.slice(0, spaceIndex) : tagContent).toLowerCase();
+        const space = tagContent.indexOf(" ");
+
+        const tagName = (space > -1 ? tagContent.slice(0, space) : tagContent)
+          .toLowerCase();
 
         const node = new Node(ELEMENT_NODE, tagName);
+
+        if (tagName === "a") {
+          const hrefMatch = tagContent.match(/href\s*=\s*["']([^"']+)["']/i);
+          if (hrefMatch) node.attrs!.href = hrefMatch[1];
+        }
+
         stack[stack.length - 1].children.push(node);
 
-        // Self-closing tags
-        if (!tagContent.endsWith("/")) {
-          stack.push(node);
-        }
+        if (!tagContent.endsWith("/")) stack.push(node);
 
         i = end + 1;
       }
     } else {
-      // Text node
-      const nextTag = html.indexOf("<", i);
-      const text = html.slice(i, nextTag === -1 ? html.length : nextTag);
+      const next = html.indexOf("<", i);
+      const text = html.slice(i, next === -1 ? html.length : next);
+
       if (text.trim()) {
-        stack[stack.length - 1].children.push(new Node(TEXT_NODE, null, text));
+        stack[stack.length - 1].children.push(new Node(TEXT_NODE, undefined, text));
       }
+
       i += text.length;
     }
   }
@@ -179,158 +227,130 @@ function parseHtml(html) {
   return root;
 }
 
-/**
- * Serialize the node tree back to HTML while filtering tags
- */
-function serializeNode(node, allowedTags = [], dangerousTags = []) {
-  if (node.type === 3) return node.text; // text node
+function serializeNode(node: any, allowed: string[], dangerous: string[]): string {
+  if (node.type === 3) return node.text;
 
-  if (dangerousTags.includes(node.tagName)) return ""; // remove dangerous content
+  if (dangerous.includes(node.tagName)) return "";
 
-  let content = node.children.map(child => serializeNode(child, allowedTags, dangerousTags)).join("");
+  const content = node.children
+    .map((child: any) => serializeNode(child, allowed, dangerous))
+    .join("");
 
-  if (allowedTags.includes(node.tagName)) {
-    return `<${node.tagName}>${content}</${node.tagName}>`;
+  if (!allowed.includes(node.tagName)) return content;
+
+  if (node.tagName === "a" && node.attrs?.href) {
+    return `<a href="${node.attrs.href}">${content}</a>`;
   }
 
-  return content; // strip other tags but keep inner text
+  return `<${node.tagName}>${content}</${node.tagName}>`;
 }
 
-/**
- * Main function to clean HTML using simple DOM parser
- */
-function cleanHtml(html) {
+function cleanHtml(html: string) {
   const allowedTags = [
-    "html","body",
-    "div", "span", "p",
-    "h1","h2","h3","h4","h5","h6",
-    "em","i","strong","b","u","small","mark","sub","sup",
-    "a","abbr","cite","q","code","time",
-    "ul","ol","li","blockquote"
+    "html", "body", "div", "span", "p",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "em", "i", "strong", "b", "u", "small",
+    "mark", "sub", "sup", "a", "abbr",
+    "cite", "q", "code", "time",
+    "ul", "ol", "li", "blockquote"
   ];
 
-  const dangerousTags = ["script","style","noscript"];
+  const dangerousTags = ["script", "style", "noscript"];
 
   const root = parseHtml(html);
-  return root.children.map(child => serializeNode(child, allowedTags, dangerousTags)).join("");
-}
 
-// HTML cleaner -----------------
+  return root.children
+    .map((child: any) => serializeNode(child, allowedTags, dangerousTags))
+    .join("");
+}
 
 /* ================================
    TOOL IMPLEMENTATIONS
 ================================ */
 
-function getCurrentUtcTime(): string {
+function getCurrentUtcTime() {
   return new Date().toISOString();
 }
 
+async function htmlDump(url: string) {
 
-/* ================================
-   TOOL: HTML DUMP (HEADLESS CHROME)
-================================ */
-
-async function htmlDump(url: string): Promise<{
-  success: boolean;
-  exitCode: number | null;
-  file?: string;
-  stderr?: string;
-  html?: string;
-  error?: string;
-}> {
-  //   const tmpFile = path.join(
-  //     os.tmpdir(),
-  //     `html-dump-${Date.now()}.html`
-  //   );
-  const tmpFile = RESULT_FILE; //'zztmp.html'
+  const validatedUrl = validateUrl(url);
 
   return new Promise((resolve) => {
+
     const chrome = spawn(CHROME_BIN, [
       "--headless",
       "--disable-gpu",
+      "--disable-extensions",
       "--dump-dom",
-      "--virtual-time-budget=15000",
-      url
+      "--virtual-time-budget=18000",
+      validatedUrl
     ]);
 
     let stdout = "";
     let stderr = "";
 
-    chrome.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
+    chrome.stdout.on("data", d => stdout += d.toString());
+    chrome.stderr.on("data", d => stderr += d.toString());
 
-    chrome.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    chrome.on("error", (err) => {
-      resolve({
-        success: false,
-        exitCode: null,
-        error: err.message
-      });
-    });
+    const timeout = setTimeout(() => chrome.kill(), 20000);
 
     chrome.on("close", async (code) => {
-      try {
-        await fs.writeFile(tmpFile, stdout, "utf-8");
-        LAST_HTML_CONTENT = cleanHtml(stdout)
-        await fs.writeFile(tmpFile + 'l', LAST_HTML_CONTENT, "utf-8");
 
-        const result = {
-          success: code === 0,
-          exitCode: code,
-          fileName: tmpFile,
-          stderr,
-          fileSize: LAST_HTML_CONTENT.length
-        }
+      clearTimeout(timeout);
 
-        println(JSON.stringify(result, null, 2))
+      LAST_HTML_CONTENT = cleanHtml(stdout);
 
-        resolve(result);
-      } catch (err: any) {
-        resolve({
-          success: false,
-          exitCode: code,
-          error: err.message,
-          stderr
-        });
+      // Save files for debug purposes if path is defined
+      if (TMP_HTML_PATH) {
+        fs.writeFile(TMP_HTML_PATH, stdout, "utf-8");
+        await fs.writeFile(`${TMP_HTML_PATH}l`, LAST_HTML_CONTENT, "utf-8");
       }
+
+      resolve({
+        success: code === 0,
+        exitCode: code,
+        fileSize: LAST_HTML_CONTENT.length,
+        stderr
+      });
+
     });
+
   });
 }
 
+async function htmlRead(params: { offset: number; length: number }) {
 
-/* ================================
-   TOOL: HTML READ (FROM htmlDump FILE)
-================================ */
+  const offset = Math.max(0, params.offset);
+  let length = Math.min(params.length, MAX_HTML_READ_LENGTH);
 
-async function htmlRead(params: { offset: number; length: number }): Promise<{ content: string }> {
-  // const filePath = RESULT_FILE;
+  const data = LAST_HTML_CONTENT;
+  const total = data.length;
 
-  const offset = Math.max(0, params.offset ?? 0);
-  let length = Math.min(params.length ?? MAX_HTML_READ_LENGTH, MAX_HTML_READ_LENGTH);
-
-  try {
-    // const data = await fs.readFile(filePath, "utf-8");
-    const data = LAST_HTML_CONTENT;
-    const fileSize = data.length;
-
-    if (offset >= fileSize) {
-      return { content: "" };
-    }
-
-    if (offset + length > fileSize) {
-      length = fileSize - offset;
-    }
-
-    return { content: data.slice(offset, offset + length) };
-  } catch (err: any) {
-    return { content: "" }; // if file missing or error, return empty string
+  if (offset >= total) {
+    return {
+      content: "",
+      offset,
+      nextOffset: offset,
+      totalFileSize: total,
+      done: true
+    };
   }
-}
 
+  if (offset + length > total) length = total - offset;
+
+  const content = data.slice(offset, offset + length);
+
+  const nextOffset = offset + length;
+
+  return {
+    content,
+    offset,
+    nextOffset,
+    totalFileSize: total,
+    done: nextOffset >= total
+  };
+}
 
 /* ================================
    MCP TOOL DEFINITIONS
@@ -339,31 +359,22 @@ async function htmlRead(params: { offset: number; length: number }): Promise<{ c
 const tools = [
   {
     name: "getCurrentUtcTime",
-    description: "Returns the current UTC time in ISO 8601 format.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      additionalProperties: false
-    }
+    description: "Returns the current UTC time.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
   },
   {
     name: "htmlDump",
-    description: "fetch a web page using local Chrome headless to dump DOM to a file",
+    description: "Fetch webpage HTML using headless Chrome",
     inputSchema: {
       type: "object",
-      properties: {
-        url: {
-          type: "string",
-          description: "Webpage URL to dump using headless Chrome."
-        }
-      },
+      properties: { url: { type: "string" } },
       required: ["url"],
       additionalProperties: false
     }
   },
   {
     name: "htmlRead",
-    description: "Read part of the last dumped HTML file in chunks.",
+    description: "Read the HTML file last fetched with htmlDump in chunks",
     inputSchema: {
       type: "object",
       properties: {
@@ -380,20 +391,24 @@ const tools = [
    MCP HANDLER
 ================================ */
 
-async function handleMcp(
-  req: IncomingMessage,
-  res: ServerResponse
-) {
+async function handleMcp(req: IncomingMessage, res: ServerResponse) {
+
   let body = "";
 
-  req.on("data", (chunk) => {
+  req.on("data", chunk => {
+
     body += chunk.toString();
+
+    if (body.length > MAX_BODY_SIZE) {
+      sendError(res, null, -32000, "Request too large");
+      req.destroy();
+    }
+
   });
 
   req.on("end", async () => {
-    let request: JsonRpcRequest;
 
-    logln(` BODY: ${body}`);
+    let request: JsonRpcRequest;
 
     try {
       request = JSON.parse(body);
@@ -406,6 +421,8 @@ async function handleMcp(
     }
 
     try {
+      logln(`  ${request.method}  ${(request.method === 'tools/call' ? ' => ' + (JSON.stringify(request.params ?? {})) : '')}`)
+
       switch (request.method) {
 
         case "initialize":
@@ -415,10 +432,7 @@ async function handleMcp(
             result: {
               protocolVersion: "2024-11-05",
               capabilities: { tools: {} },
-              serverInfo: {
-                name: SERVER_NAME,
-                version: SERVER_VERSION
-              }
+              serverInfo: { name: SERVER_NAME, version: SERVER_VERSION }
             }
           });
 
@@ -430,61 +444,43 @@ async function handleMcp(
           });
 
         case "tools/call": {
+
           const { name, arguments: args } = request.params ?? {};
 
           if (!name) {
             return sendError(res, request.id ?? null, -32602, "Missing tool name");
           }
 
+          let result;
+
           if (name === "getCurrentUtcTime") {
-            const result = getCurrentUtcTime();
-            return sendResponse(res, {
-              jsonrpc: "2.0",
-              id: request.id ?? null,
-              result: {
-                content: [{ type: "text", text: result }]
-              }
-            });
+            result = getCurrentUtcTime();
           } else if (name === "htmlDump") {
-            if (!args?.url) {
-              return sendError(res, request.id ?? null, -32602, "Missing 'url'");
-            }
-
-            const result = await htmlDump(args.url);
-
-            return sendResponse(res, {
-              jsonrpc: "2.0",
-              id: request.id ?? null,
-              result: {
-                content: [{ type: "text", text: JSON.stringify(result) }]
-              }
-            });
+            result = await htmlDump(args?.url);
           } else if (name === "htmlRead") {
-            const { offset, length } = args ?? {};
-            if (offset == null || length == null) {
-              return sendError(res, request.id ?? null, -32602, "Missing 'offset' or 'length'");
-            }
-
-            const result = await htmlRead({ offset, length });
-
-            return sendResponse(res, {
-              jsonrpc: "2.0",
-              id: request.id ?? null,
-              result: {
-                content: [{ type: "text", text: result.content }]
-              }
-            });
+            result = await htmlRead(args);
+          } else {
+            return sendError(res, request.id ?? null, -32601, "Tool not found");
           }
 
-          return sendError(res, request.id ?? null, -32601, "Tool not found");
+          return sendResponse(res, {
+            jsonrpc: "2.0",
+            id: request.id ?? null,
+            result: {
+              content: [{ type: "text", text: JSON.stringify(result) }]
+            }
+          });
+
         }
 
         default:
           return sendError(res, request.id ?? null, -32601, "Method not found");
       }
+
     } catch (err: any) {
       return sendError(res, request.id ?? null, -32603, err.message);
     }
+
   });
 }
 
@@ -492,20 +488,25 @@ async function handleMcp(
    HTTP SERVER
 ================================ */
 
-const server = http.createServer(async (req: Request, res: ServerResponse) => {
-  if (req.url === "/mcp") {
-    if (req.method === "POST") {
-      logln(`${(new Date()).toISOString()}  ${req.method} ${req.url}`);
-      handleMcp(req, res);
-    } else if (req.method === "OPTIONS") {
-      sendResponse(res, "" as unknown as JsonRpcResponse)
-    }
-  } else {
-    res.writeHead(404);
-    res.end("Not Found");
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
   }
+
+  if (req.url === "/mcp" && req.method === "POST") {
+    println(`${new Date().toISOString()} POST /mcp`);
+    handleMcp(req, res);
+    return;
+  }
+
+  res.writeHead(404);
+  res.end("Not Found");
+
 });
 
 server.listen(PORT, () => {
-  console.log(`MCP 2024 Streamable HTTP server running at http://localhost:${PORT}/mcp`);
+  println(`MCP server running at http://localhost:${PORT}/mcp`);
 });
