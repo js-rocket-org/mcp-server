@@ -34,13 +34,14 @@ curl -X POST http://localhost:3000/mcp-server/v1 \
 import http, { IncomingMessage, ServerResponse } from "node:http";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+
 
 const println = console.log;
 const logln = (...args) => { console.log(...args) }
 
-const RESULT_FILE = 'zztmp.html'
+const RESULT_FILE = '/Volumes/RAMDisk/zztmp.htm'
+const MAX_HTML_READ_LENGTH = 8192
+let LAST_HTML_CONTENT = ""
 
 const FETCH_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36"
 const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; // change to full path if needed
@@ -104,6 +105,118 @@ function sendError(
   });
 }
 
+
+
+// HTML cleaner -----------------
+
+/**
+ * Simple DOM-like parser to strip unwanted tags
+ * without relying on regex
+ */
+
+function parseHtml(html) {
+  // Node types
+  const ELEMENT_NODE = 1;
+  const TEXT_NODE = 3;
+
+  class Node {
+    constructor(type, tagName = null, text = "") {
+      this.type = type;
+      this.tagName = tagName;
+      this.children = [];
+      this.text = text;
+    }
+  }
+
+  const root = new Node(ELEMENT_NODE, "root");
+  const stack = [root];
+  let i = 0;
+
+  while (i < html.length) {
+    if (html[i] === "<") {
+      // Detect end tag
+      if (html[i + 1] === "/") {
+        const end = html.indexOf(">", i);
+        if (end === -1) break;
+        const tagName = html.slice(i + 2, end).trim().toLowerCase();
+        // Pop stack until matching tag
+        for (let j = stack.length - 1; j >= 0; j--) {
+          if (stack[j].tagName === tagName) {
+            stack.splice(j);
+            break;
+          }
+        }
+        i = end + 1;
+      } else {
+        // Start tag
+        const end = html.indexOf(">", i);
+        if (end === -1) break;
+        const tagContent = html.slice(i + 1, end).trim();
+        const spaceIndex = tagContent.indexOf(" ");
+        const tagName = (spaceIndex > -1 ? tagContent.slice(0, spaceIndex) : tagContent).toLowerCase();
+
+        const node = new Node(ELEMENT_NODE, tagName);
+        stack[stack.length - 1].children.push(node);
+
+        // Self-closing tags
+        if (!tagContent.endsWith("/")) {
+          stack.push(node);
+        }
+
+        i = end + 1;
+      }
+    } else {
+      // Text node
+      const nextTag = html.indexOf("<", i);
+      const text = html.slice(i, nextTag === -1 ? html.length : nextTag);
+      if (text.trim()) {
+        stack[stack.length - 1].children.push(new Node(TEXT_NODE, null, text));
+      }
+      i += text.length;
+    }
+  }
+
+  return root;
+}
+
+/**
+ * Serialize the node tree back to HTML while filtering tags
+ */
+function serializeNode(node, allowedTags = [], dangerousTags = []) {
+  if (node.type === 3) return node.text; // text node
+
+  if (dangerousTags.includes(node.tagName)) return ""; // remove dangerous content
+
+  let content = node.children.map(child => serializeNode(child, allowedTags, dangerousTags)).join("");
+
+  if (allowedTags.includes(node.tagName)) {
+    return `<${node.tagName}>${content}</${node.tagName}>`;
+  }
+
+  return content; // strip other tags but keep inner text
+}
+
+/**
+ * Main function to clean HTML using simple DOM parser
+ */
+function cleanHtml(html) {
+  const allowedTags = [
+    "html","body",
+    "div", "span", "p",
+    "h1","h2","h3","h4","h5","h6",
+    "em","i","strong","b","u","small","mark","sub","sup",
+    "a","abbr","cite","q","code","time",
+    "ul","ol","li","blockquote"
+  ];
+
+  const dangerousTags = ["script","style","noscript"];
+
+  const root = parseHtml(html);
+  return root.children.map(child => serializeNode(child, allowedTags, dangerousTags)).join("");
+}
+
+// HTML cleaner -----------------
+
 /* ================================
    TOOL IMPLEMENTATIONS
 ================================ */
@@ -112,57 +225,6 @@ function getCurrentUtcTime(): string {
   return new Date().toISOString();
 }
 
-async function fetchTextFromUrl(params: {
-  url: string;
-  method?: string;
-  body?: string;
-  headers?: Record<string, string>;
-}): Promise<{
-  status: number;
-  statusText: string;
-  headers: Record<string, string>;
-  body: string;
-}> {
-  const {
-    url,
-    method = "GET",
-    body,
-    headers = {}
-  } = params;
-
-  try {
-    const response = await fetch(url, {
-      method,
-      headers: {
-        "User-Agent": FETCH_USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/json",
-        ...headers
-      },
-      body: body && method !== "GET" ? body : undefined
-    });
-
-    const responseText = await response.text();
-
-    const responseHeaders: Record<string, string> = {};
-    response.headers.forEach((value, key) => {
-      responseHeaders[key] = value;
-    });
-
-    return {
-      status: response.status,
-      statusText: response.statusText,
-      headers: responseHeaders,
-      body: responseText
-    };
-  } catch (error: any) {
-    return {
-      status: 0,
-      statusText: "FETCH_ERROR",
-      headers: {},
-      body: error.message
-    };
-  }
-}
 
 /* ================================
    TOOL: HTML DUMP (HEADLESS CHROME)
@@ -213,12 +275,15 @@ async function htmlDump(url: string): Promise<{
     chrome.on("close", async (code) => {
       try {
         await fs.writeFile(tmpFile, stdout, "utf-8");
+        LAST_HTML_CONTENT = cleanHtml(stdout)
+        await fs.writeFile(tmpFile + 'l', LAST_HTML_CONTENT, "utf-8");
+
         const result = {
           success: code === 0,
           exitCode: code,
-          file: tmpFile,
+          fileName: tmpFile,
           stderr,
-          html: stdout
+          fileSize: LAST_HTML_CONTENT.length
         }
 
         println(JSON.stringify(result, null, 2))
@@ -236,6 +301,37 @@ async function htmlDump(url: string): Promise<{
   });
 }
 
+
+/* ================================
+   TOOL: HTML READ (FROM htmlDump FILE)
+================================ */
+
+async function htmlRead(params: { offset: number; length: number }): Promise<{ content: string }> {
+  // const filePath = RESULT_FILE;
+
+  const offset = Math.max(0, params.offset ?? 0);
+  let length = Math.min(params.length ?? MAX_HTML_READ_LENGTH, MAX_HTML_READ_LENGTH);
+
+  try {
+    // const data = await fs.readFile(filePath, "utf-8");
+    const data = LAST_HTML_CONTENT;
+    const fileSize = data.length;
+
+    if (offset >= fileSize) {
+      return { content: "" };
+    }
+
+    if (offset + length > fileSize) {
+      length = fileSize - offset;
+    }
+
+    return { content: data.slice(offset, offset + length) };
+  } catch (err: any) {
+    return { content: "" }; // if file missing or error, return empty string
+  }
+}
+
+
 /* ================================
    MCP TOOL DEFINITIONS
 ================================ */
@@ -250,24 +346,6 @@ const tools = [
       additionalProperties: false
     }
   },
-  // {
-  //   name: "fetchTextFromUrl",
-  //   description: "Fetches content from a URL. Supports custom method, headers, and body.",
-  //   inputSchema: {
-  //     type: "object",
-  //     properties: {
-  //       url: { type: "string" },
-  //       method: { type: "string", default: "GET" },
-  //       body: { type: "string" },
-  //       headers: {
-  //         type: "object",
-  //         additionalProperties: { type: "string" }
-  //       }
-  //     },
-  //     required: ["url"],
-  //     additionalProperties: false
-  //   }
-  // },
   {
     name: "htmlDump",
     description: "fetch a web page using local Chrome headless to dump DOM to a file",
@@ -280,6 +358,19 @@ const tools = [
         }
       },
       required: ["url"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "htmlRead",
+    description: "Read part of the last dumped HTML file in chunks.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        offset: { type: "number", description: "Starting character offset." },
+        length: { type: "number", description: `Number of characters to read (max ${MAX_HTML_READ_LENGTH}).` }
+      },
+      required: ["offset", "length"],
       additionalProperties: false
     }
   }
@@ -354,25 +445,7 @@ async function handleMcp(
                 content: [{ type: "text", text: result }]
               }
             });
-          }
-
-          if (name === "fetchTextFromUrl") {
-            if (!args?.url) {
-              return sendError(res, request.id ?? null, -32602, "Missing 'url'");
-            }
-
-            const result = await fetchTextFromUrl(args);
-
-            return sendResponse(res, {
-              jsonrpc: "2.0",
-              id: request.id ?? null,
-              result: {
-                content: [{ type: "text", text: JSON.stringify(result) }]
-              }
-            });
-          }
-
-          if (name === "htmlDump") {
+          } else if (name === "htmlDump") {
             if (!args?.url) {
               return sendError(res, request.id ?? null, -32602, "Missing 'url'");
             }
@@ -384,6 +457,21 @@ async function handleMcp(
               id: request.id ?? null,
               result: {
                 content: [{ type: "text", text: JSON.stringify(result) }]
+              }
+            });
+          } else if (name === "htmlRead") {
+            const { offset, length } = args ?? {};
+            if (offset == null || length == null) {
+              return sendError(res, request.id ?? null, -32602, "Missing 'offset' or 'length'");
+            }
+
+            const result = await htmlRead({ offset, length });
+
+            return sendResponse(res, {
+              jsonrpc: "2.0",
+              id: request.id ?? null,
+              result: {
+                content: [{ type: "text", text: result.content }]
               }
             });
           }
