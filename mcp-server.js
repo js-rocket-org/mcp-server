@@ -70,8 +70,8 @@ interface JsonRpcResponse {
    CONFIG
 ================================ */
 
-const PORT = 80;
-const SERVER_NAME = "example-mcp-server";
+const PORT = 3003;
+const SERVER_NAME = "My MCP Server";
 const SERVER_VERSION = "1.0.0";
 
 /* ================================
@@ -176,11 +176,11 @@ async function htmlDump(url: string): Promise<{
   html?: string;
   error?: string;
 }> {
-//   const tmpFile = path.join(
-//     os.tmpdir(),
-//     `html-dump-${Date.now()}.html`
-//   );
-   const tmpFile = RESULT_FILE; //'zztmp.html'
+  //   const tmpFile = path.join(
+  //     os.tmpdir(),
+  //     `html-dump-${Date.now()}.html`
+  //   );
+  const tmpFile = RESULT_FILE; //'zztmp.html'
 
   return new Promise((resolve) => {
     const chrome = spawn(CHROME_BIN, [
@@ -250,27 +250,27 @@ const tools = [
       additionalProperties: false
     }
   },
-  {
-    name: "fetchTextFromUrl",
-    description: "Fetches content from a URL. Supports custom method, headers, and body.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string" },
-        method: { type: "string", default: "GET" },
-        body: { type: "string" },
-        headers: {
-          type: "object",
-          additionalProperties: { type: "string" }
-        }
-      },
-      required: ["url"],
-      additionalProperties: false
-    }
-  },
+  // {
+  //   name: "fetchTextFromUrl",
+  //   description: "Fetches content from a URL. Supports custom method, headers, and body.",
+  //   inputSchema: {
+  //     type: "object",
+  //     properties: {
+  //       url: { type: "string" },
+  //       method: { type: "string", default: "GET" },
+  //       body: { type: "string" },
+  //       headers: {
+  //         type: "object",
+  //         additionalProperties: { type: "string" }
+  //       }
+  //     },
+  //     required: ["url"],
+  //     additionalProperties: false
+  //   }
+  // },
   {
     name: "htmlDump",
-    description: "Uses local Chrome headless to dump DOM to a file.",
+    description: "fetch a web page using local Chrome headless to dump DOM to a file",
     inputSchema: {
       type: "object",
       properties: {
@@ -404,10 +404,14 @@ async function handleMcp(
    HTTP SERVER
 ================================ */
 
-const server = http.createServer(async (req, res) => {
-  if (req.method === "POST" && req.url === "/mcp") {
-    logln(`${(new Date()).toISOString()}  ${req.method} ${req.url}`);
-    handleMcp(req, res);
+const server = http.createServer(async (req: Request, res: ServerResponse) => {
+  if (req.url === "/mcp") {
+    if (req.method === "POST") {
+      logln(`${(new Date()).toISOString()}  ${req.method} ${req.url}`);
+      handleMcp(req, res);
+    } else if (req.method === "OPTIONS") {
+      sendResponse(res, "" as unknown as JsonRpcResponse)
+    }
   } else {
     res.writeHead(404);
     res.end("Not Found");
