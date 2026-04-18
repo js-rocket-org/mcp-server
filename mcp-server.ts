@@ -34,6 +34,8 @@ curl -X POST http://localhost:3003/mcp \
 import http, { IncomingMessage, ServerResponse } from "node:http";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import path from "node:path"
+
 
 // For output that always go to the screen
 const println = console.log;
@@ -53,10 +55,12 @@ const MAX_BODY_SIZE = 5 * 1024 * 1024;
 const MAX_HTML_READ_LENGTH = 8192;
 
 const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const WORKSPACE_PATH = '/Volumes/RAMDisk/work/mcp-server'
+const TEMP_HTML_FILE = "tmp.htm"
 
-const TMP_HTML_PATH = '/Volumes/RAMDisk/zztmp.htm'
 
-let LAST_HTML_CONTENT = "";
+const CHUNK_SIZE = 16384
+const CHUNK_BUFFER = Buffer.alloc(CHUNK_SIZE);
 
 /* ================================
    TYPES
@@ -73,6 +77,7 @@ interface JsonRpcResponse {
   jsonrpc: "2.0";
   id: string | number | null;
   result?: any;
+  content?: any;
   error?: {
     code: number;
     message: string;
@@ -149,120 +154,87 @@ function validateUrl(url: string) {
    SIMPLE HTML CLEANER
 ================================ */
 
-function parseHtml(html: string) {
-  const ELEMENT_NODE = 1;
-  const TEXT_NODE = 3;
+function filterXml(xml: string, disallowedTags: string[]): string {
+  const disallowed = new Set(disallowedTags.map(t => t.toLowerCase()));
 
-  class Node {
-    type: number;
-    tagName?: string;
-    text?: string;
-    attrs?: Record<string, string>;
-    children: Node[];
-
-    constructor(type: number, tagName?: string, text?: string) {
-      this.type = type;
-      this.tagName = tagName;
-      this.text = text;
-      this.attrs = {};
-      this.children = [];
-    }
-  }
-
-  const root = new Node(ELEMENT_NODE, "root");
-  const stack = [root];
+  let output = "";
   let i = 0;
+  const len = xml.length;
 
-  while (i < html.length) {
-    if (html[i] === "<") {
-      if (html[i + 1] === "/") {
-        const end = html.indexOf(">", i);
-        if (end === -1) break;
+  while (i < len) {
+    const char = xml[i];
 
-        const tag = html.slice(i + 2, end).trim().toLowerCase();
-
-        for (let j = stack.length - 1; j >= 0; j--) {
-          if (stack[j].tagName === tag) {
-            stack.splice(j);
-            break;
-          }
-        }
-
-        i = end + 1;
-      } else {
-        const end = html.indexOf(">", i);
-        if (end === -1) break;
-
-        const tagContent = html.slice(i + 1, end).trim();
-        const space = tagContent.indexOf(" ");
-
-        const tagName = (space > -1 ? tagContent.slice(0, space) : tagContent)
-          .toLowerCase();
-
-        const node = new Node(ELEMENT_NODE, tagName);
-
-        if (tagName === "a") {
-          const hrefMatch = tagContent.match(/href\s*=\s*["']([^"']+)["']/i);
-          if (hrefMatch) node.attrs!.href = hrefMatch[1];
-        }
-
-        stack[stack.length - 1].children.push(node);
-
-        if (!tagContent.endsWith("/")) stack.push(node);
-
-        i = end + 1;
-      }
-    } else {
-      const next = html.indexOf("<", i);
-      const text = html.slice(i, next === -1 ? html.length : next);
-
-      if (text.trim()) {
-        stack[stack.length - 1].children.push(new Node(TEXT_NODE, undefined, text));
-      }
-
-      i += text.length;
+    if (char !== "<") {
+      output += char;
+      i++;
+      continue;
     }
+
+    const tagStart = i;
+    const tagEnd = xml.indexOf(">", tagStart);
+    if (tagEnd === -1) {
+      output += xml.slice(i);
+      break;
+    }
+
+    const rawTag = xml.slice(tagStart + 1, tagEnd).trim();
+
+    const isClosing = rawTag.startsWith("/");
+    const cleaned = isClosing ? rawTag.slice(1).trim() : rawTag;
+
+    // Extract tag name
+    const tagName = cleaned
+      .split(/\s|\/>/)[0]
+      .replace(/\/$/, "")
+      .toLowerCase();
+
+    const isSelfClosing = /\/\s*$/.test(rawTag);
+
+    // Allowed tag → keep as-is
+    if (!disallowed.has(tagName)) {
+      output += xml.slice(tagStart, tagEnd + 1);
+      i = tagEnd + 1;
+      continue;
+    }
+
+    // Disallowed + self-closing → remove only this tag
+    if (isSelfClosing) {
+      i = tagEnd + 1;
+      continue;
+    }
+
+    // Disallowed + closing tag → skip it
+    if (isClosing) {
+      i = tagEnd + 1;
+      continue;
+    }
+
+    // Disallowed + normal opening tag → remove entire block
+    const closingTag = `</${tagName}>`;
+    const lowerXml = xml.toLowerCase();
+    const closeIndex = lowerXml.indexOf(closingTag, tagEnd + 1);
+
+    if (closeIndex === -1) {
+      // malformed XML: remove only the opening tag
+      i = tagEnd + 1;
+      continue;
+    }
+
+    // Skip entire element including closing tag
+    i = closeIndex + closingTag.length;
   }
 
-  return root;
+  return output;
 }
 
-function serializeNode(node: any, allowed: string[], dangerous: string[]): string {
-  if (node.type === 3) return node.text;
 
-  if (dangerous.includes(node.tagName)) return "";
+function cleanHtml(html: string): string {
+  const disAllowedTag = ["style", "script", "template", "link", "svg", "a", "head", "iframe",
+    "nav", "footer", "header", "input", "button"]
 
-  const content = node.children
-    .map((child: any) => serializeNode(child, allowed, dangerous))
-    .join("");
-
-  if (!allowed.includes(node.tagName)) return content;
-
-  if (node.tagName === "a" && node.attrs?.href) {
-    return `<a href="${node.attrs.href}">${content}</a>`;
-  }
-
-  return `<${node.tagName}>${content}</${node.tagName}>`;
+  return filterXml(html, disAllowedTag)
 }
 
-function cleanHtml(html: string) {
-  const allowedTags = [
-    "html", "body", "div", "span", "p",
-    "h1", "h2", "h3", "h4", "h5", "h6",
-    "em", "i", "strong", "b", "u", "small",
-    "mark", "sub", "sup", "a", "abbr",
-    "cite", "q", "code", "time",
-    "ul", "ol", "li", "blockquote"
-  ];
-
-  const dangerousTags = ["script", "style", "noscript"];
-
-  const root = parseHtml(html);
-
-  return root.children
-    .map((child: any) => serializeNode(child, allowedTags, dangerousTags))
-    .join("");
-}
 
 /* ================================
    TOOL IMPLEMENTATIONS
@@ -291,7 +263,7 @@ async function htmlDump(url: string) {
     let stderr = "";
 
     chrome.stdout.on("data", d => stdout += d.toString());
-    chrome.stderr.on("data", d => stderr += d.toString());
+    // chrome.stderr.on("data", d => stderr += d.toString());
 
     const timeout = setTimeout(() => chrome.kill(), 20000);
 
@@ -299,19 +271,21 @@ async function htmlDump(url: string) {
 
       clearTimeout(timeout);
 
-      LAST_HTML_CONTENT = cleanHtml(stdout);
+      const CLEANED_HTML_CONTENT = stdout.startsWith('<') ? cleanHtml(stdout) : stdout;
+      // const LAST_HTML_CONTENT = stdout;
 
-      // Save files for debug purposes if path is defined
+      const TMP_HTML_PATH = `${WORKSPACE_PATH}/${TEMP_HTML_FILE}`
       if (TMP_HTML_PATH) {
-        fs.writeFile(TMP_HTML_PATH, stdout, "utf-8");
-        await fs.writeFile(`${TMP_HTML_PATH}l`, LAST_HTML_CONTENT, "utf-8");
+        // fs.writeFile(`${TMP_HTML_PATH}l`, LAST_HTML_CONTENT, "utf-8");
+        await fs.writeFile(`${TMP_HTML_PATH}`, CLEANED_HTML_CONTENT, "utf-8");
       }
 
       resolve({
         success: code === 0,
         exitCode: code,
-        fileSize: LAST_HTML_CONTENT.length,
-        stderr
+        fileName: TEMP_HTML_FILE,
+        fileSize: CLEANED_HTML_CONTENT.length,
+        // stderr
       });
 
     });
@@ -319,38 +293,29 @@ async function htmlDump(url: string) {
   });
 }
 
-async function htmlRead(params: { offset: number; length: number }) {
 
-  const offset = Math.max(0, params.offset);
-  let length = Math.min(params.length, MAX_HTML_READ_LENGTH);
+async function fileRead(fileName: string, offset: number) {
+  const resolved = path.resolve(WORKSPACE_PATH, fileName);
 
-  const data = LAST_HTML_CONTENT;
-  const total = data.length;
-
-  if (offset >= total) {
-    return {
-      content: "",
-      offset,
-      nextOffset: offset,
-      totalFileSize: total,
-      done: true
-    };
+  if (!resolved.startsWith(WORKSPACE_PATH + path.sep)) {
+    return { errorMessage: `ERROR: file now found ${fileName}` };
   }
 
-  if (offset + length > total) length = total - offset;
+  const fileHandle = await fs.open(fileName, 'r');
 
-  const content = data.slice(offset, offset + length);
+  try {
+    const { bytesRead } = await fileHandle.read(CHUNK_BUFFER, 0, CHUNK_SIZE, offset);
 
-  const nextOffset = offset + length;
-
-  return {
-    content,
-    offset,
-    nextOffset,
-    totalFileSize: total,
-    done: nextOffset >= total
-  };
+    const result = {
+      nextOffset: bytesRead !== CHUNK_SIZE ? '*' : offset + CHUNK_SIZE,
+      fileContent: CHUNK_BUFFER.toString('utf8', 0, bytesRead),
+    };
+    return `${result.nextOffset} ${result.fileContent}`;
+  } finally {
+    await fileHandle.close();
+  }
 }
+
 
 /* ================================
    MCP TOOL DEFINITIONS
@@ -364,7 +329,7 @@ const tools = [
   },
   {
     name: "htmlDump",
-    description: "Fetch webpage HTML using headless Chrome",
+    description: "Fetch a Web page or URL into a file. Returns file name",
     inputSchema: {
       type: "object",
       properties: { url: { type: "string" } },
@@ -373,15 +338,16 @@ const tools = [
     }
   },
   {
-    name: "htmlRead",
-    description: "Read the HTML file last fetched with htmlDump in chunks",
+    name: "fileRead",
+    description: `Read file in chunks. Call multiple times to read whole file. ` +
+      "Returns next byte offset or * if no more content, followed by space, then the chunk content",
     inputSchema: {
       type: "object",
       properties: {
-        offset: { type: "number", description: "Starting character offset." },
-        length: { type: "number", description: `Number of characters to read (max ${MAX_HTML_READ_LENGTH}).` }
+        filename: { type: "string", description: "name of file in workspace" },
+        offset: { type: "number", description: "byte offset to read from" },
       },
-      required: ["offset", "length"],
+      required: ["filename", "offset"],
       additionalProperties: false
     }
   }
@@ -451,25 +417,44 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse) {
             return sendError(res, request.id ?? null, -32602, "Missing tool name");
           }
 
-          let result;
+          let toolResult;
 
           if (name === "getCurrentUtcTime") {
-            result = getCurrentUtcTime();
+            toolResult = getCurrentUtcTime();
           } else if (name === "htmlDump") {
-            result = await htmlDump(args?.url);
-          } else if (name === "htmlRead") {
-            result = await htmlRead(args);
+            toolResult = await htmlDump(args?.url);
+          } else if (name === "fileRead") {
+            toolResult = await fileRead(args?.filename, args?.offset);
           } else {
             return sendError(res, request.id ?? null, -32601, "Tool not found");
           }
 
-          return sendResponse(res, {
+          // working
+          // const mcpResponse: JsonRpcResponse = {
+          //   jsonrpc: "2.0",
+          //   id: request.id ?? null,
+          //  result: {content:
+          //   [{type: 'text', text: JSON.stringify(toolResult)}]
+          //  }
+          // }
+          // let text = ""
+          // if (name === "fileRead") {
+          //   text = toolResult.fileContent
+          // } else {
+          //   text = JSON.stringify(toolResult)
+          // }
+
+          const mcpResponse: JsonRpcResponse = {
             jsonrpc: "2.0",
             id: request.id ?? null,
             result: {
-              content: [{ type: "text", text: JSON.stringify(result) }]
+              content: [
+                { type: 'text', text: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult) }
+              ]
             }
-          });
+          }
+          // println(JSON.stringify(mcpResponse, null, 2))
+          return sendResponse(res, mcpResponse);
 
         }
 
