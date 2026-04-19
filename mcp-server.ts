@@ -55,7 +55,7 @@ const MAX_BODY_SIZE = 5 * 1024 * 1024;
 const MAX_HTML_READ_LENGTH = 8192;
 
 const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const WORKSPACE_PATH = '/Volumes/RAMDisk/work/mcp-server'
+const WORKSPACE_PATH = '/Volumes/RAMDisk/work'
 const TEMP_HTML_FILE = "tmp.htm"
 
 
@@ -296,9 +296,8 @@ async function htmlDump(url: string) {
 
 async function fileRead(fileName: string, offset: number) {
   const resolved = path.resolve(WORKSPACE_PATH, fileName);
-
   if (!resolved.startsWith(WORKSPACE_PATH + path.sep)) {
-    return { errorMessage: `ERROR: file now found ${fileName}` };
+    return { errorMessage: `ERROR: file not found ${fileName}` };
   }
 
   const fileHandle = await fs.open(fileName, 'r');
@@ -313,6 +312,32 @@ async function fileRead(fileName: string, offset: number) {
     return `${result.nextOffset} ${result.fileContent}`;
   } finally {
     await fileHandle.close();
+  }
+}
+
+
+async function fileWrite(fileName: string, content: string, isAppend: boolean) {
+  try {
+    const resolved = path.resolve(WORKSPACE_PATH, fileName);
+    if (!resolved.startsWith(WORKSPACE_PATH + path.sep)) {
+      return `error: file not found ${fileName}`;
+    }
+
+    const dir = path.dirname(resolved);
+    await fs.mkdir(dir, { recursive: true });
+  } catch (err1) {
+    return `error: ${err1}`;
+  }
+
+  try {
+    if (isAppend) {
+      await fs.appendFile(fileName, content + "\n", { encoding: "utf8" });
+    } else {
+      await fs.writeFile(fileName, content + "\n", { encoding: "utf8" });
+    }
+    return "success";
+  } catch (err2) {
+    return `error: ${err2}`;
   }
 }
 
@@ -346,6 +371,20 @@ const tools = [
       properties: {
         filename: { type: "string", description: "name of file in workspace" },
         offset: { type: "number", description: "byte offset to read from" },
+      },
+      required: ["filename", "offset"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "fileWrite",
+    description: "Write string content to a file, with isAppend flag to append to existing file instead of overwrite or create",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filename: { type: "string", description: "name of file in workspace" },
+        content: { type: "string", description: "string content to write or append to file" },
+        isAppend: { type: "boolean", description: "flag to indicate append or overwrite/create file" },
       },
       required: ["filename", "offset"],
       additionalProperties: false
@@ -425,24 +464,11 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse) {
             toolResult = await htmlDump(args?.url);
           } else if (name === "fileRead") {
             toolResult = await fileRead(args?.filename, args?.offset);
+          } else if (name === "fileWrite") {
+            toolResult = await fileWrite(args?.filename, args?.content, args?.isAppend)
           } else {
             return sendError(res, request.id ?? null, -32601, "Tool not found");
           }
-
-          // working
-          // const mcpResponse: JsonRpcResponse = {
-          //   jsonrpc: "2.0",
-          //   id: request.id ?? null,
-          //  result: {content:
-          //   [{type: 'text', text: JSON.stringify(toolResult)}]
-          //  }
-          // }
-          // let text = ""
-          // if (name === "fileRead") {
-          //   text = toolResult.fileContent
-          // } else {
-          //   text = JSON.stringify(toolResult)
-          // }
 
           const mcpResponse: JsonRpcResponse = {
             jsonrpc: "2.0",
