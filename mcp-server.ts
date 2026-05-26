@@ -29,18 +29,17 @@ curl -X POST http://localhost:3003/mcp \
 
 */
 
-
-
 import http, { IncomingMessage, ServerResponse } from "node:http";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import path from "node:path"
-
+import path from "node:path";
 
 // For output that always go to the screen
 const println = console.log;
 // For logging to debug console or file
-const logln = (...args) => { console.log(...args) }
+const logln = (...args) => {
+  console.log(...args);
+};
 
 /* ================================
    CONFIG
@@ -54,12 +53,14 @@ const SERVER_VERSION = "1.0.0";
 const MAX_BODY_SIZE = 5 * 1024 * 1024;
 const MAX_HTML_READ_LENGTH = 8192;
 
-const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const WORKSPACE_PATH = '/Volumes/RAMDisk/work'
-const TEMP_HTML_FILE = "tmp.htm"
+// const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+// const WORKSPACE_PATH = '/Volumes/RAMDisk/work'
 
+const CHROME_BIN = "/usr/bin/chromium";
+const WORKSPACE_PATH = "/home/me/ramdisk/work";
+const TEMP_HTML_FILE = "tmp.htm";
 
-const CHUNK_SIZE = 16384
+const CHUNK_SIZE = 16384;
 const CHUNK_BUFFER = Buffer.alloc(CHUNK_SIZE);
 
 /* ================================
@@ -91,13 +92,13 @@ interface JsonRpcResponse {
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "*"
+  "Access-Control-Allow-Headers": "*",
 };
 
 function sendResponse(res: ServerResponse, response: JsonRpcResponse) {
   res.writeHead(200, {
     "Content-Type": "application/json",
-    ...CORS_HEADERS
+    ...CORS_HEADERS,
   });
 
   res.end(JSON.stringify(response));
@@ -107,12 +108,12 @@ function sendError(
   res: ServerResponse,
   id: string | number | null,
   code: number,
-  message: string
+  message: string,
 ) {
   sendResponse(res, {
     jsonrpc: "2.0",
     id,
-    error: { code, message }
+    error: { code, message },
   });
 }
 
@@ -135,7 +136,7 @@ function validateUrl(url: string) {
 
   /* Allow local urls
     const host = parsed.hostname;
-  
+
     if (
       host === "localhost" ||
       host.startsWith("127.") ||
@@ -155,7 +156,7 @@ function validateUrl(url: string) {
 ================================ */
 
 function filterXml(xml: string, disallowedTags: string[]): string {
-  const disallowed = new Set(disallowedTags.map(t => t.toLowerCase()));
+  const disallowed = new Set(disallowedTags.map((t) => t.toLowerCase()));
 
   let output = "";
   let i = 0;
@@ -227,14 +228,25 @@ function filterXml(xml: string, disallowedTags: string[]): string {
   return output;
 }
 
-
 function cleanHtml(html: string): string {
-  const disAllowedTag = ["style", "script", "template", "link", "svg", "a", "head", "iframe",
-    "nav", "footer", "header", "input", "button"]
+  const disAllowedTag = [
+    "style",
+    "script",
+    "template",
+    "link",
+    "svg",
+    "a",
+    "head",
+    "iframe",
+    "nav",
+    "footer",
+    "header",
+    "input",
+    "button",
+  ];
 
-  return filterXml(html, disAllowedTag)
+  return filterXml(html, disAllowedTag);
 }
-
 
 /* ================================
    TOOL IMPLEMENTATIONS
@@ -245,36 +257,35 @@ function getCurrentUtcTime() {
 }
 
 async function htmlDump(url: string) {
-
   const validatedUrl = validateUrl(url);
 
   return new Promise((resolve) => {
-
     const chrome = spawn(CHROME_BIN, [
       "--headless",
       "--disable-gpu",
       "--disable-extensions",
       "--dump-dom",
       "--virtual-time-budget=18000",
-      validatedUrl
+      validatedUrl,
     ]);
 
     let stdout = "";
     let stderr = "";
 
-    chrome.stdout.on("data", d => stdout += d.toString());
+    chrome.stdout.on("data", (d) => stdout += d.toString());
     // chrome.stderr.on("data", d => stderr += d.toString());
 
     const timeout = setTimeout(() => chrome.kill(), 20000);
 
     chrome.on("close", async (code) => {
-
       clearTimeout(timeout);
 
-      const CLEANED_HTML_CONTENT = stdout.startsWith('<') ? cleanHtml(stdout) : stdout;
+      const CLEANED_HTML_CONTENT = stdout.startsWith("<")
+        ? cleanHtml(stdout)
+        : stdout;
       // const LAST_HTML_CONTENT = stdout;
 
-      const TMP_HTML_PATH = `${WORKSPACE_PATH}/${TEMP_HTML_FILE}`
+      const TMP_HTML_PATH = `${WORKSPACE_PATH}/${TEMP_HTML_FILE}`;
       if (TMP_HTML_PATH) {
         // fs.writeFile(`${TMP_HTML_PATH}l`, LAST_HTML_CONTENT, "utf-8");
         await fs.writeFile(`${TMP_HTML_PATH}`, CLEANED_HTML_CONTENT, "utf-8");
@@ -287,12 +298,9 @@ async function htmlDump(url: string) {
         fileSize: CLEANED_HTML_CONTENT.length,
         // stderr
       });
-
     });
-
   });
 }
-
 
 async function fileRead(fileName: string, offset: number) {
   const resolved = path.resolve(WORKSPACE_PATH, fileName);
@@ -300,21 +308,25 @@ async function fileRead(fileName: string, offset: number) {
     return { errorMessage: `ERROR: file not found ${fileName}` };
   }
 
-  const fileHandle = await fs.open(fileName, 'r');
+  const fileHandle = await fs.open(fileName, "r");
 
   try {
-    const { bytesRead } = await fileHandle.read(CHUNK_BUFFER, 0, CHUNK_SIZE, offset);
+    const { bytesRead } = await fileHandle.read(
+      CHUNK_BUFFER,
+      0,
+      CHUNK_SIZE,
+      offset,
+    );
 
     const result = {
-      nextOffset: bytesRead !== CHUNK_SIZE ? '*' : offset + CHUNK_SIZE,
-      fileContent: CHUNK_BUFFER.toString('utf8', 0, bytesRead),
+      nextOffset: bytesRead !== CHUNK_SIZE ? "*" : offset + CHUNK_SIZE,
+      fileContent: CHUNK_BUFFER.toString("utf8", 0, bytesRead),
     };
     return `${result.nextOffset} ${result.fileContent}`;
   } finally {
     await fileHandle.close();
   }
 }
-
 
 async function fileWrite(fileName: string, content: string, isAppend: boolean) {
   try {
@@ -341,7 +353,6 @@ async function fileWrite(fileName: string, content: string, isAppend: boolean) {
   }
 }
 
-
 /* ================================
    MCP TOOL DEFINITIONS
 ================================ */
@@ -350,7 +361,21 @@ const tools = [
   {
     name: "getCurrentUtcTime",
     description: "Returns the current UTC time.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "stringLength",
+    description: "returns the length of input string",
+    inputSchema: {
+      type: "object",
+      properties: { input: { type: "string" } },
+      required: ["input"],
+      additionalProperties: false,
+    },
   },
   {
     name: "htmlDump",
@@ -359,12 +384,13 @@ const tools = [
       type: "object",
       properties: { url: { type: "string" } },
       required: ["url"],
-      additionalProperties: false
-    }
+      additionalProperties: false,
+    },
   },
   {
     name: "fileRead",
-    description: `Read file in chunks. Call multiple times to read whole file. ` +
+    description:
+      `Read file in chunks. Call multiple times to read whole file. ` +
       "Returns next byte offset or * if no more content, followed by space, then the chunk content",
     inputSchema: {
       type: "object",
@@ -373,23 +399,30 @@ const tools = [
         offset: { type: "number", description: "byte offset to read from" },
       },
       required: ["filename", "offset"],
-      additionalProperties: false
-    }
+      additionalProperties: false,
+    },
   },
   {
     name: "fileWrite",
-    description: "Write string content to a file, with isAppend flag to append to existing file instead of overwrite or create",
+    description:
+      "Write string content to a file, with isAppend flag to append to existing file instead of overwrite or create",
     inputSchema: {
       type: "object",
       properties: {
         filename: { type: "string", description: "name of file in workspace" },
-        content: { type: "string", description: "string content to write or append to file" },
-        isAppend: { type: "boolean", description: "flag to indicate append or overwrite/create file" },
+        content: {
+          type: "string",
+          description: "string content to write or append to file",
+        },
+        isAppend: {
+          type: "boolean",
+          description: "flag to indicate append or overwrite/create file",
+        },
       },
-      required: ["filename", "offset"],
-      additionalProperties: false
-    }
-  }
+      required: ["filename", "content", "isAppend"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 /* ================================
@@ -397,22 +430,18 @@ const tools = [
 ================================ */
 
 async function handleMcp(req: IncomingMessage, res: ServerResponse) {
-
   let body = "";
 
-  req.on("data", chunk => {
-
+  req.on("data", (chunk) => {
     body += chunk.toString();
 
     if (body.length > MAX_BODY_SIZE) {
       sendError(res, null, -32000, "Request too large");
       req.destroy();
     }
-
   });
 
   req.on("end", async () => {
-
     let request: JsonRpcRequest;
 
     try {
@@ -426,10 +455,13 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse) {
     }
 
     try {
-      logln(`  ${request.method}  ${(request.method === 'tools/call' ? ' => ' + (JSON.stringify(request.params ?? {})) : '')}`)
+      logln(
+        `  ${request.method}  ${(request.method === "tools/call"
+          ? " => " + (JSON.stringify(request.params ?? {}))
+          : "")}`,
+      );
 
       switch (request.method) {
-
         case "initialize":
           return sendResponse(res, {
             jsonrpc: "2.0",
@@ -437,35 +469,45 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse) {
             result: {
               protocolVersion: "2024-11-05",
               capabilities: { tools: {} },
-              serverInfo: { name: SERVER_NAME, version: SERVER_VERSION }
-            }
+              serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+            },
           });
 
         case "tools/list":
           return sendResponse(res, {
             jsonrpc: "2.0",
             id: request.id ?? null,
-            result: { tools }
+            result: { tools },
           });
 
         case "tools/call": {
-
           const { name, arguments: args } = request.params ?? {};
 
           if (!name) {
-            return sendError(res, request.id ?? null, -32602, "Missing tool name");
+            return sendError(
+              res,
+              request.id ?? null,
+              -32602,
+              "Missing tool name",
+            );
           }
 
           let toolResult;
 
           if (name === "getCurrentUtcTime") {
             toolResult = getCurrentUtcTime();
+          } else if (name === "stringLength") {
+            toolResult = (args?.input ?? '').length
           } else if (name === "htmlDump") {
             toolResult = await htmlDump(args?.url);
           } else if (name === "fileRead") {
             toolResult = await fileRead(args?.filename, args?.offset);
           } else if (name === "fileWrite") {
-            toolResult = await fileWrite(args?.filename, args?.content, args?.isAppend)
+            toolResult = await fileWrite(
+              args?.filename,
+              args?.content,
+              args?.isAppend,
+            );
           } else {
             return sendError(res, request.id ?? null, -32601, "Tool not found");
           }
@@ -475,23 +517,25 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse) {
             id: request.id ?? null,
             result: {
               content: [
-                { type: 'text', text: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult) }
-              ]
-            }
-          }
+                {
+                  type: "text",
+                  text: typeof toolResult === "string"
+                    ? toolResult
+                    : JSON.stringify(toolResult),
+                },
+              ],
+            },
+          };
           // println(JSON.stringify(mcpResponse, null, 2))
           return sendResponse(res, mcpResponse);
-
         }
 
         default:
           return sendError(res, request.id ?? null, -32601, "Method not found");
       }
-
     } catch (err: any) {
       return sendError(res, request.id ?? null, -32603, err.message);
     }
-
   });
 }
 
@@ -499,24 +543,24 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse) {
    HTTP SERVER
 ================================ */
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer(
+  (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, CORS_HEADERS);
+      res.end();
+      return;
+    }
 
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, CORS_HEADERS);
-    res.end();
-    return;
-  }
+    if (req.url === "/mcp" && req.method === "POST") {
+      println(`${new Date().toISOString()} POST /mcp`);
+      handleMcp(req, res);
+      return;
+    }
 
-  if (req.url === "/mcp" && req.method === "POST") {
-    println(`${new Date().toISOString()} POST /mcp`);
-    handleMcp(req, res);
-    return;
-  }
-
-  res.writeHead(404);
-  res.end("Not Found");
-
-});
+    res.writeHead(404);
+    res.end("Not Found");
+  },
+);
 
 server.listen(PORT, () => {
   println(`MCP server running at http://localhost:${PORT}/mcp`);
