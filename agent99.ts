@@ -1,10 +1,4 @@
 // Simple streaming chat client using fetch() for OpenAI-compatible APIs
-// No external packages required. Node 18+ only.
-
-// const API_URL = "http://localhost:2050/v1/chat/completions";
-// const MODEL = "gpt-4o-gemma-4-E4B-it-Q5_K_M.gguf";
-
-// Simple streaming chat client using fetch() for OpenAI-compatible APIs
 // Supports system prompts, /reset command, and post-processing of completed replies.
 // No external packages. Node 18+.
 
@@ -27,34 +21,36 @@ const CHROME_BIN = "/usr/bin/chromium";
 const WORKSPACE_PATH = process.cwd(); // "/home/me/ramdisk";
 const TEMP_HTML_FILE = "tmp.htm";
 
-const CHUNK_SIZE = 16384;
+const CHUNK_SIZE = 8192;
 const CHUNK_BUFFER = Buffer.alloc(CHUNK_SIZE);
 
-const TOOL_PREFIX = "[TOOL-START-8972]";
+const TOOL_PREFIX = "[TOOL-5x2dt]";
 
 let SYSTEM_PROMPT =
-  `You are an agent with access to 3 features. To use a feature simply start a line with:
+  `You are an agent with access to 3 tools. To use a tool simply start a line with:
   ${TOOL_PREFIX}
   followed by the feature name, then the feature parameters as a JSONL object all in one line.
-  All features return a status JSONL object in the first line, followed by the result in the second line.
+  All tools return a status JSONL object in the first line, followed by the result in the second line.
   The status JSONL will always have an 'ok' boolean key, indicating success or failure. Examples:
   {"ok":true}
   {"ok":false,"reason":"file not found"}
 
-  The features you have access to are:
+  The tools you have access to are:
 1. getUtcTime - get the current time
   - has no parameters, pass empty JSONL object {}
-2. fileWrite - write a line (max 512 bytes) of text to a file.
+2. fileWrite - write multiple lines to a text file. Adds new line character to last line (max up to 1024 bytes).
   - example parameters: {"filename":"test.txt","isAppend":false,"line":"This is a line of text"}
-3. fileRead - read a line of text from a file
+3. fileRead - read multiple lines from a text file that fits in a buffer (max size: ${CHUNK_SIZE}bytes)
   - example parameters: {"filename":"test.txt","offset":0}
+  - returned properties: nextLineOffset = indicates more content if greater than zero, linecount = number of lines read
 
 example calls:
 ${TOOL_PREFIX}getUtcTime{}
 ${TOOL_PREFIX}fileRead{"filename":"x.txt","offset":0}
 
 Rules:
-- Wait for the feature to respond before trying to use another feature
+- stop response after issuing a tool call
+- Wait for tool response before sending another tool request or continue with your response
 `;
 
 // SYSTEM_PROMPT='You are an agent'
@@ -80,6 +76,7 @@ function getUtcTime() {
   return `{"ok":true}\n${new Date().toISOString()}`;
 }
 
+/*
 async function fileRead(fileName: string, offset: number): Promise<string> {
   const resolved = path.resolve(WORKSPACE_PATH, fileName);
   if (!resolved.startsWith(WORKSPACE_PATH + path.sep)) {
@@ -118,6 +115,79 @@ async function fileRead(fileName: string, offset: number): Promise<string> {
     }
   } catch (err) {
     return JSON.stringify({ ok: false, reason: `${err}` });
+  }
+}
+  */
+
+async function fileRead(fileName: string, offset: number): Promise<string> {
+  const resolved = path.resolve(WORKSPACE_PATH, fileName);
+
+  // Security check
+  if (!resolved.startsWith(WORKSPACE_PATH + path.sep)) {
+    return JSON.stringify({
+      ok: false,
+      reason: `file not found or outside workspace: ${fileName}`,
+    });
+  }
+
+  let fileHandle: fs.FileHandle | null = null;
+
+  try {
+    fileHandle = await fs.open(resolved, "r");
+
+    const { bytesRead } = await fileHandle.read(
+      CHUNK_BUFFER,
+      0,
+      CHUNK_SIZE,
+      offset,
+    );
+
+    if (bytesRead === 0) {
+      return JSON.stringify({ ok: false, reason: "end of file" });
+    }
+
+    const chunk = CHUNK_BUFFER.toString("utf8", 0, bytesRead);
+
+    // Find last newline in this chunk
+    const lastNL = chunk.lastIndexOf("\n");
+
+    let linesText: string;
+    let nextOffset: number;
+    let lineCount: number;
+
+    if (lastNL !== -1) {
+      // We have at least one complete line
+      linesText = chunk.slice(0, lastNL); // everything before last '\n'
+
+      // Count lines by scanning for '\n'
+      lineCount = 1;
+      for (let i = 0; i < lastNL; i++) {
+        if (chunk[i] === "\n") lineCount++;
+      }
+
+      // Compute next offset: everything up to and including last '\n'
+      nextOffset = offset +
+        Buffer.byteLength(chunk.slice(0, lastNL + 1), "utf8");
+    } else {
+      // No newline in chunk → this is the final line of the file
+      linesText = chunk;
+      lineCount = 1;
+      nextOffset = -1;
+    }
+
+    const status = {
+      ok: true,
+      nextLineOffset: nextOffset,
+      lineCount,
+    };
+
+    return `${JSON.stringify(status)}\n${linesText}`;
+  } catch (err) {
+    return JSON.stringify({ ok: false, reason: String(err) });
+  } finally {
+    if (fileHandle) {
+      await fileHandle.close();
+    }
   }
 }
 
@@ -217,73 +287,73 @@ const rl = readline.createInterface({
 // STREAMING CHAT REQUEST
 // -----------------------------
 async function sendMessage(userInput: string) {
-  setTimeout(async () => {
-    messages.push({ role: "user", content: userInput });
+  // setTimeout(async () => {
+  messages.push({ role: "user", content: userInput });
 
-    const response = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${API_KEY}`,
-      },
-      body: JSON.stringify({
-        "parallel_tool_calls": false,
-        // "tool_choice": "none",
-        // model: MODEL,
-        messages,
-        stream: true,
-      }),
-    });
+  const response = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${API_KEY}`,
+    },
+    body: JSON.stringify({
+      "parallel_tool_calls": false,
+      // "tool_choice": "none",
+      // model: MODEL,
+      messages,
+      stream: true,
+    }),
+  });
 
-    if (!response.ok || !response.body) {
-      console.error("Error:", response.status, response.statusText);
-      promptUser();
-      return;
-    }
+  if (!response.ok || !response.body) {
+    console.error("Error:", response.status, response.statusText);
+    promptUser();
+    return;
+  }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let assistantReply = "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let assistantReply = "";
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split("\n");
+    const chunk = decoder.decode(value, { stream: true });
+    const lines = chunk.split("\n");
 
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
 
-        const data = line.slice(6).trim();
-        if (data === "[DONE]") {
-          process.stdout.write("\n");
+      const data = line.slice(6).trim();
+      if (data === "[DONE]") {
+        process.stdout.write("\n");
 
-          messages.push({ role: "assistant", content: assistantReply });
+        messages.push({ role: "assistant", content: assistantReply });
 
-          // 🔥 Call your custom post-processing function
-          handleCompletedReply(assistantReply);
+        // 🔥 Call your custom post-processing function
+        await handleCompletedReply(assistantReply);
 
-          promptUser();
-          return;
+        promptUser();
+        return;
+      }
+
+      try {
+        const json = JSON.parse(data);
+        const delta = json.choices?.[0]?.delta?.content;
+        if (delta) {
+          assistantReply += delta;
+          process.stdout.write(delta);
         }
-
-        try {
-          const json = JSON.parse(data);
-          const delta = json.choices?.[0]?.delta?.content;
-          if (delta) {
-            assistantReply += delta;
-            process.stdout.write(delta);
-          }
-        } catch {
-          // ignore malformed JSON
-        }
+      } catch {
+        // ignore malformed JSON
       }
     }
+  }
 
-    process.stdout.write("\n");
-    promptUser();
-  }, 2000);
+  process.stdout.write("\n");
+  promptUser();
+  // }, 1200);
 }
 
 // -----------------------------
@@ -293,9 +363,7 @@ function promptUser() {
   rl.question("> ", (input: string) => {
     // RESET COMMAND
     if (input.trim().toLowerCase() === "/reset") {
-      messages = [
-        { role: "system", content: SYSTEM_PROMPT },
-      ];
+      messages = [{ role: "system", content: SYSTEM_PROMPT }];
       console.log("(conversation reset)");
       promptUser();
       return;
@@ -313,4 +381,5 @@ function promptUser() {
 console.log(
   "Simple Chat Client (type 'exit' to quit, '/reset' to clear history)",
 );
+
 promptUser();
