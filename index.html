@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chat Interface</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      margin: 0;
+      padding: 20px;
+      box-sizing: border-box;
+      background-color: #f4f4f9;
+    }
+    #chat-window {
+      flex: 1;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 10px;
+      margin-bottom: 10px;
+      background-color: #fff;
+      border-radius: 4px;
+    }
+    .message {
+      margin-bottom: 10px;
+      padding: 8px;
+      border-radius: 4px;
+    }
+    .user-message {
+      background-color: #e3f2fd;
+      align-self: flex-end;
+      text-align: right;
+    }
+    .server-message {
+      background-color: #f1f1f1;
+      align-self: flex-start;
+    }
+    .input-area {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    textarea {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      resize: vertical;
+      min-height: 40px;
+      max-height: 200px;
+    }
+    button {
+      padding: 10px 20px;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:disabled {
+      background-color: #ccc;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="chat-window"></div>
+
+  <div class="input-area">
+    <textarea id="message-input" placeholder="Type your message..."></textarea>
+    <div>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+
+  <script>
+    const chatWindow = document.getElementById('chat-window');
+    const messageInput = document.getElementById('message-input');
+    const sendBtn = document.getElementById('send-btn');
+
+    // Replace this URL with your actual remote server endpoint
+    const SERVER_URL = 'http://localhost:2052/prompt';
+
+    const appendMessage = (text, type) => {
+      const messageDiv = document.createElement('div');
+      messageDiv.classList.add('message', `${type}-message`);
+      messageDiv.textContent = text;
+      chatWindow.appendChild(messageDiv);
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+    };
+
+    const sendMessage = async () => {
+      const content = messageInput.value.trim();
+      if (!content) return;
+
+      // UI Updates
+      appendMessage(content, 'user');
+      messageInput.value = '';
+      sendBtn.disabled = true;
+
+      try {
+        const response = await fetch(SERVER_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ input: content }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Server error: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        // Assuming server returns { reply: "..." }
+        appendMessage(data.reply || 'No reply received', 'server');
+      } catch (error) {
+        appendMessage(`Error: ${error.message}`, 'server');
+      } finally {
+        sendBtn.disabled = false;
+      }
+    };
+
+    sendBtn.addEventListener('click', sendMessage);
+
+    messageInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+      }
+    });
+  </script>
+  <script src="add-on.js"></script>
+</body>
+</html>
+
